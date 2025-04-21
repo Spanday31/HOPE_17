@@ -1,168 +1,169 @@
+# Improved SMART CVD Risk Reduction Calculator with Enhanced UI
+
 import streamlit as st
-import os
 import math
 import pandas as pd
-import plotly.graph_objects as go
-import logging
-from io import BytesIO
-from docx import Document
+import matplotlib.pyplot as plt
 
-# ── Setup Logging for Analytics ─────────────────────────────────────────────────
-logging.basicConfig(filename='analytics.log', level=logging.INFO,
-                    format='%(asctime)s - %(message)s')
+# Page Config
+st.set_page_config(layout="wide")
+st.markdown("""
+    <div style='background-color:#0e1117;padding:1rem;border-radius:10px'>
+        <h1 style='color:#ffffff;text-align:center;'>SMART CVD Risk Reduction Calculator</h1>
+        <p style='color:#cccccc;text-align:center;'>Developed by Samuel Panday — 21/04/2025</p>
+    </div>
+""", unsafe_allow_html=True)
 
-# ── Page Config & Custom CSS ─────────────────────────────────────────────────
-st.set_page_config(layout="wide", page_title="SMART CVD Risk Reduction")
-st.markdown('''<style>
-.header { background:#f7f7f7; padding:10px; text-align:center; }
-.card { background:#fff; padding:15px; margin-bottom:15px; border-radius:8px;
-        box-shadow:0 1px 3px rgba(0,0,0,0.1); }
-</style>''', unsafe_allow_html=True)
+# Intervention data
+interventions = [
+    {"name": "Smoking cessation", "arr_lifetime": 17, "arr_5yr": 5},
+    {"name": "Antiplatelet (ASA or clopidogrel)", "arr_lifetime": 6, "arr_5yr": 2},
+    {"name": "BP control (ACEi/ARB ± CCB)", "arr_lifetime": 12, "arr_5yr": 4},
+    {"name": "Semaglutide 2.4 mg", "arr_lifetime": 4, "arr_5yr": 1},
+    {"name": "Weight loss to ideal BMI", "arr_lifetime": 10, "arr_5yr": 3},
+    {"name": "Empagliflozin", "arr_lifetime": 6, "arr_5yr": 2},
+    {"name": "Icosapent ethyl (TG ≥1.5)", "arr_lifetime": 5, "arr_5yr": 2},
+    {"name": "Mediterranean diet", "arr_lifetime": 9, "arr_5yr": 3},
+    {"name": "Physical activity", "arr_lifetime": 9, "arr_5yr": 3},
+    {"name": "Alcohol moderation", "arr_lifetime": 5, "arr_5yr": 2},
+    {"name": "Stress reduction", "arr_lifetime": 3, "arr_5yr": 1}
+]
 
-# ── Header with Logo ─────────────────────────────────────────────────────────
-st.markdown('<div class="header">', unsafe_allow_html=True)
-if os.path.exists("logo.png"):
-    st.image("logo.png", width=600)
-else:
-    st.warning("⚠️ Logo not found — upload 'logo.png'")
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ── Initialize session state for profile ─────────────────────────────────────
-if 'age' not in st.session_state:
-    st.session_state.update({
-        'age': 60, 'sex': 'Male', 'weight': 75.0, 'height': 170.0,
-        'smoker': False, 'diabetes': False, 'egfr': 90,
-        'tc': 5.2, 'hdl': 1.3, 'ldl0': 3.0, 'crp': 2.5,
-        'hba1c': 7.0, 'tg': 1.2,
-        'pre_stat': 'None', 'pre_ez': False, 'pre_bemp': False,
-        'new_stat': 'None', 'new_ez': False, 'new_bemp': False,
-        'sbp': 140
-    })
-
-# ── Evidence Mapping ─────────────────────────────────────────────────────────
-TRIALS = {
-    "Atorvastatin 80 mg": ("CTT meta-analysis", "https://pubmed.ncbi.nlm.nih.gov/20167315/"),
-    "Rosuvastatin 20 mg": ("CTT meta-analysis", "https://pubmed.ncbi.nlm.nih.gov/20167315/"),
-    "Ezetimibe 10 mg":     ("IMPROVE-IT",         "https://pubmed.ncbi.nlm.nih.gov/26405142/"),
-    "Bempedoic acid":      ("CLEAR Outcomes",     "https://pubmed.ncbi.nlm.nih.gov/35338941/"),
-    "PCSK9 inhibitor":     ("FOURIER",            "https://pubmed.ncbi.nlm.nih.gov/28436927/"),
-    "Inclisiran":          ("ORION-10",           "https://pubmed.ncbi.nlm.nih.gov/32302303/"),
-    "Icosapent ethyl":     ("REDUCE-IT",          "https://pubmed.ncbi.nlm.nih.gov/31141850/"),
-    "Semaglutide":         ("STEP",               "https://pubmed.ncbi.nlm.nih.gov/34499685/")
+ldl_therapies = {
+    "Atorvastatin 20 mg": 40,
+    "Atorvastatin 80 mg": 50,
+    "Rosuvastatin 10 mg": 40,
+    "Rosuvastatin 20–40 mg": 55,
+    "Simvastatin 40 mg": 35,
+    "Ezetimibe": 20,
+    "PCSK9 inhibitor": 60,
+    "Bempedoic acid": 18
 }
 
-# ── Utility & Risk Functions ─────────────────────────────────────────────────
-def calculate_ldl_projection(baseline_ldl, pre_list, new_list):
-    E = {
-        "Atorvastatin 80 mg": 0.50,
-        "Rosuvastatin 20 mg": 0.55,
-        "Ezetimibe 10 mg":     0.20,
-        "Bempedoic acid":      0.18,
-        "PCSK9 inhibitor":     0.60,
-        "Inclisiran":          0.55
-    }
-    ldl = baseline_ldl
-    for drug in pre_list + new_list:
-        if drug in E:
-            ldl *= (1 - E[drug])
-    return max(ldl, 0.5)
+# SMART Risk Score Calculation
 
-def estimate_10y_risk(age, sex, sbp, tc, hdl, smoker, diabetes, egfr, crp, vasc):
-    sex_v = 1 if sex == "Male" else 0
-    smoke_v = 1 if smoker else 0
-    dm_v = 1 if diabetes else 0
-    crp_l = math.log(crp + 1)
-    lp = (0.064 * age + 0.34 * sex_v + 0.02 * sbp + 0.25 * tc
-          -0.25 * hdl + 0.44 * smoke_v + 0.51 * dm_v
-          -0.2 * (egfr / 10) + 0.25 * crp_l + 0.4 * vasc)
-    raw = 1 - 0.900 ** math.exp(lp - 5.8)
-    return round(min(raw * 100, 95.0), 1)
+def estimate_smart_risk(age, sex, sbp, total_chol, hdl, smoker, diabetes, egfr, crp, vasc_count):
+    sex_val = 1 if sex == "Male" else 0
+    smoking_val = 1 if smoker else 0
+    diabetes_val = 1 if diabetes else 0
+    crp_log = math.log(crp + 1) if crp else 0
+    lp = (0.064*age + 0.34*sex_val + 0.02*sbp + 0.25*total_chol -
+          0.25*hdl + 0.44*smoking_val + 0.51*diabetes_val -
+          0.2*(egfr/10) + 0.25*crp_log + 0.4*vasc_count)
+    risk10 = 1 - 0.900**math.exp(lp - 5.8)
+    return round(risk10 * 100, 1)
 
-def convert_5yr(r10):
-    p = min(r10, 95.0) / 100
-    return round(min((1 - (1 - p) ** 0.5) * 100, 95.0), 1)
+def convert_5yr_from_10yr(risk10):
+    p = risk10 / 100
+    return round((1 - (1-p)**0.5) * 100, 1)
 
-def estimate_lifetime_risk(age, r10):
-    years = max(85 - age, 0)
-    p10 = min(r10, 95.0) / 100
-    annual = 1 - (1 - p10) ** (1 / 10)
-    return round(min((1 - (1 - annual) ** years) * 100, 95.0), 1)
+# Main Form
+col_input, col_output = st.columns([1, 2])
 
-def fmt_pct(x): return f"{x:.1f}%"
-def fmt_pp(x):  return f"{x:.1f} pp"
+with col_input:
+    with st.form("risk_inputs"):
+        st.header("🧾 Patient Profile")
+        age = st.slider("Age", 30, 90, 60)
+        sex = st.radio("Sex", ["Male", "Female"], horizontal=True)
+        smoker = st.checkbox("Smoking")
+        diabetes = st.checkbox("Diabetes")
 
-# ── UI Flow ─────────────────────────────────────────────────────────────────
-step = st.sidebar.radio("Go to Step", ["1: Profile", "2: Labs", "3: Therapies", "4: Results"])
+        st.header("🧪 Labs & Vascular Disease")
+        egfr = st.slider("eGFR (mL/min/1.73 m²)", 15, 120, 80)
+        total_chol = st.number_input("Total Cholesterol (mmol/L)", 2.0, 10.0, 5.0, 0.1)
+        hdl = st.number_input("HDL‑C (mmol/L)", 0.5, 3.0, 1.0, 0.1)
+        crp = st.number_input("hs‑CRP (mg/L)", 0.1, 20.0, 2.0, 0.1)
+        baseline_ldl = st.number_input("Baseline LDL‑C (mmol/L)", 0.5, 6.0, 3.5, 0.1)
+        hba1c = st.number_input("Latest HbA₁c (%)", 5.0, 12.0, 7.0, 0.1)
 
-if step == "1: Profile":
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    age = st.number_input("Age (years)", 30, 90, key='age')
-    sex = st.radio("Sex", ["Male", "Female"], key='sex')
-    weight = st.number_input("Weight (kg)", 40.0, 200.0, key='weight')
-    height = st.number_input("Height (cm)", 140.0, 210.0, key='height')
-    bmi = weight / ((height / 100) ** 2)
-    st.write(f"**BMI:** {bmi:.1f} kg/m²")
-    smoker = st.checkbox("Current smoker", key='smoker')
-    diabetes = st.checkbox("Diabetes", key='diabetes')
-    egfr = st.slider("eGFR (mL/min/1.73 m²)", 15, 120, key='egfr')
-    st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown("**Vascular disease (tick all that apply):**")
+        vasc = [
+            st.checkbox("Coronary artery disease"),
+            st.checkbox("Cerebrovascular disease"),
+            st.checkbox("Peripheral artery disease")
+        ]
+        vasc_count = sum(vasc)
 
-elif step == "2: Labs":
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    tc = st.number_input("Total Cholesterol (mmol/L)", 2.0, 10.0, key='tc')
-    hdl = st.number_input("HDL‑C (mmol/L)", 0.5, 3.0, key='hdl')
-    ldl0 = st.number_input("Baseline LDL‑C (mmol/L)", 0.5, 6.0, key='ldl0')
-    crp = st.number_input("hs‑CRP (mg/L)", 0.1, 20.0, key='crp')
-    hba1c = st.number_input("HbA₁c (%)", 4.0, 14.0, key='hba1c')
-    tg = st.number_input("Triglycerides (mmol/L)", 0.3, 5.0, key='tg')
-    st.markdown('</div>', unsafe_allow_html=True)
+        st.header("💊 Therapy")
+        pre_tx = st.multiselect("Pre-admission lipid-lowering therapy",
+                                [f"{k} (↓{v}%)" for k, v in ldl_therapies.items()])
+        add_tx = st.multiselect("Add-on lipid-lowering therapy",
+                                [f"{k} (↓{v}%)" for k, v in ldl_therapies.items() if k not in [pt.split(" (")[0] for pt in pre_tx]])
 
-elif step == "3: Therapies":
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    pre_stat = st.selectbox("Pre‑admission Statin", ["None", "Atorvastatin 80 mg", "Rosuvastatin 20 mg"], key='pre_stat')
-    pre_ez = st.checkbox("Pre‑admission Ezetimibe", key='pre_ez')
-    pre_bemp = st.checkbox("Pre‑admission Bempedoic acid", key='pre_bemp')
-    st.markdown('</div>', unsafe_allow_html=True)
+        sbp_current = st.number_input("Current SBP (mmHg)", 80, 220, 145)
+        sbp_target = st.number_input("Target SBP (mmHg)", 80, 220, 120)
 
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    new_stat = st.selectbox("Statin change", ["None", "Atorvastatin 80 mg", "Rosuvastatin 20 mg"], key='new_stat')
-    new_ez = st.checkbox("Add Ezetimibe", key='new_ez')
-    new_bemp = st.checkbox("Add Bempedoic acid", key='new_bemp')
-    post_ldl = calculate_ldl_projection(
-        ldl0,
-        [st.session_state.pre_stat] + (["Ezetimibe 10 mg"] if st.session_state.pre_ez else []) + (["Bempedoic acid"] if st.session_state.pre_bemp else []),
-        [st.session_state.new_stat] + (["Ezetimibe 10 mg"] if st.session_state.new_ez else []) + (["Bempedoic acid"] if st.session_state.new_bemp else [])
-    )
-    pcsk9 = st.checkbox("PCSK9 inhibitor", disabled=(post_ldl <= 1.8), key='pcsk9')
-    inclisiran = st.checkbox("Inclisiran", disabled=(post_ldl <= 1.8), key='inclisiran')
-    st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown("**🏃 Lifestyle and Other Interventions**")
+        ivs = [iv["name"] for iv in interventions if st.checkbox(iv["name"])]
 
-elif step == "4: Results":
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    sbp = st.number_input("Current SBP (mmHg)", 90, 200, key='sbp')
-    r10 = estimate_10y_risk(
-        st.session_state.age, st.session_state.sex, sbp,
-        st.session_state.tc, st.session_state.hdl, st.session_state.smoker,
-        st.session_state.diabetes, st.session_state.egfr,
-        st.session_state.crp, sum([st.session_state.pre_stat != "None", st.session_state.pre_ez, st.session_state.pre_bemp])
-    )
-    r5 = convert_5yr(r10)
-    rlt = estimate_lifetime_risk(st.session_state.age, r10)
-    lifetime_display = "N/A" if st.session_state.age >= 85 else fmt_pct(rlt)
-    st.write(f"5‑yr: **{fmt_pct(r5)}**, 10‑yr: **{fmt_pct(r10)}**, Lifetime: **{lifetime_display}**")
-    fig = go.Figure(go.Bar(
-        x=["5‑yr","10‑yr","Lifetime"],
-        y=[r5, r10, rlt if st.session_state.age < 85 else None],
-        marker_color=["#f39c12","#e74c3c","#2ecc71"]
-    ))
-    fig.update_layout(yaxis_title="Risk (%)", template="plotly_white")
-    st.plotly_chart(fig, use_container_width=True)
-    arr10 = r10 - rlt if st.session_state.age < 85 else None
-    rrr10 = round(arr10 / r10 * 100, 1) if arr10 else None
-    st.write(f"ARR (10y): **{fmt_pp(arr10) if arr10 else 'N/A'}**, RRR (10y): **{fmt_pct(rrr10) if rrr10 else 'N/A'}**")
-    st.markdown('</div>', unsafe_allow_html=True)
+        horizon = st.radio("Time horizon", ["5yr", "10yr", "lifetime"], index=1)
+        patient_mode = st.checkbox("Patient-friendly view")
+        submitted = st.form_submit_button("📉 Calculate Risk")
+
+with col_output:
+    if submitted:
+        risk10 = estimate_smart_risk(age, sex, sbp_current, total_chol, hdl, smoker, diabetes, egfr, crp, vasc_count)
+        risk5 = convert_5yr_from_10yr(risk10)
+        baseline_risk = risk5 if horizon == "5yr" else risk10
+        caps = {"5yr": 80, "10yr": 85, "lifetime": 90}
+        baseline_risk_capped = min(baseline_risk, caps[horizon])
+
+        # LDL logic
+        adjusted_ldl = baseline_ldl
+        for pt in pre_tx:
+            name = pt.split(" (")[0]
+            adjusted_ldl *= (1 - ldl_therapies[name] / 100)
+        adjusted_ldl = max(adjusted_ldl, 1.0)
+
+        final_ldl = adjusted_ldl
+        for at in add_tx:
+            name = at.split(" (")[0]
+            final_ldl *= (1 - (ldl_therapies[name] / 100) * 0.5)
+        final_ldl = max(final_ldl, 1.0)
+
+        remaining = baseline_risk_capped / 100
+        for iv in interventions:
+            if iv["name"] in ivs:
+                arr = iv["arr_5yr"] if horizon == "5yr" else iv["arr_lifetime"]
+                remaining *= (1 - arr / 100)
+
+        if final_ldl < baseline_ldl:
+            drop = baseline_ldl - final_ldl
+            rrr_ldl = min(22 * drop, 35)
+            remaining *= (1 - rrr_ldl / 100)
+
+        if sbp_target < sbp_current:
+            rrr_bp = min(15 * ((sbp_current - sbp_target) / 10), 20)
+            remaining *= (1 - rrr_bp / 100)
+
+        if hba1c > 7.0:
+            rrr_hba1c = min((hba1c - 7.0) * 9, 30)
+            remaining *= (1 - rrr_hba1c / 100)
+
+        final_risk = round(remaining * 100, 1)
+        arr = round(baseline_risk_capped - final_risk, 1)
+        rrr = round(min((arr / baseline_risk_capped * 100), 75), 1) if baseline_risk_capped else 0
+
+        if patient_mode:
+            st.markdown("### ✅ Patient-Friendly Summary")
+            st.write(f"Your starting risk over {horizon} was **{baseline_risk_capped}%**.")
+            st.write(f"With the treatments selected, your new risk is **{final_risk}%**.")
+            st.write(f"This means a risk reduction of **{arr} percentage points**.")
+        else:
+            st.metric("Baseline Risk", f"{baseline_risk_capped}%")
+            st.metric("Post-intervention Risk", f"{final_risk}%")
+            st.metric("Absolute Risk Reduction (ARR)", f"{arr} pp")
+            st.metric("Relative Risk Reduction (RRR)", f"{rrr}%")
+            st.write(f"Expected LDL‑C at 3 months: **{final_ldl:.2f} mmol/L**")
+
+        fig, ax = plt.subplots()
+        ax.bar(["Baseline", "After"], [baseline_risk_capped, final_risk],
+               color=["#CC4444", "#44CC44"], alpha=0.9)
+        ax.set_title("CVD Risk Reduction")
+        ax.set_ylabel(f"{horizon} CVD Risk (%)")
+        for i, v in enumerate([baseline_risk_capped, final_risk]):
+            ax.text(i, v + 1, f"{v:.1f}%", ha='center', fontweight='bold')
+        st.pyplot(fig)
 
 st.markdown("---")
-st.markdown("Created by Samuel Panday — 21/04/2025")
-st.markdown("PRIME team, King's College Hospital")
-st.markdown("For informational purposes; not a substitute for clinical advice.")
+st.markdown("Created by PRIME team — King's College Hospital, London")
